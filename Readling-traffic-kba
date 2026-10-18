@@ -1,0 +1,158 @@
+# Reading HTTP and TLS traffic in a capture: what is visible and what isn't
+
+**Applies to:** Wireshark 3.x and 4.x; Chrome, Edge, and Firefox; HTTP/1.1, HTTP/2, HTTP/3, TLS 1.2 and 1.3
+**Audience:** Support, QA, junior network and security analysts
+**Last updated:** [date]
+
+*Menu names and field names can differ slightly between versions.*
+
+## Symptoms
+
+- You captured web traffic in Wireshark but see only "TLS", "Application Data", or "QUIC" and no URLs or content.
+- You filter for `http` and get nothing.
+- You aren't sure what an analyst can and can't learn from an encrypted capture.
+- You need to read the contents of your own test traffic to troubleshoot an application.
+
+## Cause
+
+Most web traffic today is encrypted. **HTTP** (port 80) sends everything in readable form. **HTTPS** is HTTP wrapped in **TLS**, which hides the contents. Newer protocols (HTTP/2 over TLS and HTTP/3 over QUIC) are also encrypted. A capture shows what crosses the wire, so with encrypted traffic you can see *who talked to whom, when, and how much*, but not *what was said*.
+
+## What you can see
+
+### Plain HTTP (not encrypted)
+
+Everything is readable:
+- Request method, URL path, query string, and host
+- All request and response headers, including cookies and `Authorization` headers
+- Request and response bodies (form data, JSON, files)
+- Status codes and error messages
+
+Useful display filters:
+- All HTTP traffic: `http`
+- Requests only: `http.request`
+- Responses only: `http.response`
+- By host: `http.host contains "example"`
+- By method: `http.request.method == "POST"`
+- Error responses: `http.response.code >= 400`
+- Requests carrying cookies: `http.cookie`
+- Requests carrying credentials: `http.authorization`
+
+Useful actions:
+- Right-click a packet and choose **Follow > HTTP Stream** to read a whole request and response.
+- **File > Export Objects > HTTP** lists files transferred, such as images, scripts, and documents.
+
+Plain HTTP is a security risk because anyone on the path can read credentials, cookies, and data. Spotting credentials or sensitive data in cleartext is itself a finding worth reporting.
+
+### HTTPS and other TLS traffic (encrypted)
+
+Visible in a capture:
+- **IP addresses and ports** of both sides
+- **Timing:** when connections start and end, and how often they repeat
+- **Sizes:** packet and total byte counts, and direction (upload vs download)
+- **TLS version and cipher suites** offered by the client and chosen by the server (in the Client Hello and Server Hello)
+- **Server Name Indication (SNI):** the domain the client is asking for, sent in the clear in the Client Hello in most cases. Filter: `tls.handshake.extensions_server_name`
+- **ALPN:** which protocol is being negotiated (for example `h2` for HTTP/2). Filter: `tls.handshake.extensions_alpn_str`
+- **Server certificate details in TLS 1.2:** subject, issuer, validity dates, and chain are sent unencrypted. Filter: `tls.handshake.certificate`
+- **Handshake behavior:** failures, alerts, retries, and delays
+- **Client fingerprints:** the pattern of Client Hello settings can help identify the kind of client software (often called JA3 or JA4 fingerprints, depending on your Wireshark version)
+- **DNS queries** made before the connection, if DNS is not itself encrypted
+
+Useful display filters:
+- TLS handshake messages: `tls.handshake`
+- Client Hello only: `tls.handshake.type == 1`
+- Server Hello only: `tls.handshake.type == 2`
+- TLS alerts: `tls.alert_message`
+- QUIC (HTTP/3): `quic`
+
+### What an analyst can infer without decrypting
+
+- Which domains a device contacted (from SNI and DNS)
+- How much data moved, and when (for example, a large upload to an unfamiliar domain)
+- Regular, repeating connections at fixed intervals, which can indicate automated or "beaconing" behavior
+- Outdated TLS versions or weak ciphers still in use
+- Failed or unusual handshakes, and expired or mismatched certificates in TLS 1.2 traffic
+
+## What you can't see
+
+For encrypted traffic, a capture without keys does **not** reveal:
+- The full URL path and query string (only the domain)
+- Request and response headers, cookies, and tokens
+- Request and response bodies
+- HTTP status codes and error messages
+- Which exact page or API endpoint was used
+
+Other limits to be aware of:
+- **TLS 1.3 encrypts more of the handshake.** The server certificate and most of what follows the Server Hello are not visible, so certificate details that were readable in TLS 1.2 may be hidden.
+- **Encrypted Client Hello (ECH)** where deployed can hide the SNI.
+- **DNS over HTTPS or DNS over TLS** hides DNS queries from the network. Some browsers use this by default.
+- **HTTP/3 (QUIC)** runs over UDP, usually port 443, and is encrypted from early in the connection. Capture filters or display filters built only for TCP port 443 will miss it.
+- **VPNs and tunnels** wrap everything, so only the tunnel endpoint is visible.
+
+## Resolution
+
+### Option 1: Use the browser's own tools (often the easiest)
+
+The browser is one end of the connection, so it sees everything in the clear.
+1. Open DevTools (**F12**) and go to **Network**.
+2. Select a request and read the **Headers**, **Payload**, **Response**, and **Timing** tabs.
+3. Use this for application-level troubleshooting, and use Wireshark for network-level questions such as loss, retransmissions, and handshake problems.
+
+### Option 2: Decrypt your own test traffic in Wireshark with a key log file
+
+This works for browser traffic from **your own machine or test setup**, using the browser's TLS session keys. It works for TLS 1.2 and 1.3.
+
+1. **Set the key log variable before starting the browser:**
+   - Windows (Command Prompt): `setx SSLKEYLOGFILE "C:\captures\tlskeys.log"`, then close and reopen the browser.
+   - macOS and Linux: `export SSLKEYLOGFILE=$HOME/tlskeys.log`, then launch the browser from that same terminal window.
+2. **Start the Wireshark capture first**, then open the browser and visit your test site. The capture must include the TLS handshake of the connection you want to read. Long-lived connections that began before the capture won't decrypt.
+3. **Tell Wireshark where the keys are:** open **Edit > Preferences > Protocols > TLS** and set **(Pre)-Master-Secret log filename** to the key log file.
+4. Apply the filter `http` or `http2` and look for readable requests and responses. A **Decrypted TLS** tab appears at the bottom of the packet bytes pane.
+5. For HTTP/3, a recent Wireshark with the same key log can decrypt QUIC traffic. If it doesn't work in your version, disable QUIC in the browser for the test so it falls back to TCP.
+
+Useful filters after decryption:
+- HTTP/2 traffic: `http2`
+- HTTP/2 headers by name: `http2.header.name`
+- Decrypted HTTP: `http`
+
+### Option 3: Use an intercepting proxy for test applications
+
+Tools such as Burp Suite or mitmproxy sit between your browser or app and a test server and show the decrypted traffic. Use them only against applications and systems you own or have permission to test, and with your own test browser profile.
+
+### Option 4: Practice exercise
+
+1. Run a simple local web server on a test machine (for example, Python's built-in `http.server` on port 8000). Capture while loading the page, then apply `http` and use **Follow > HTTP Stream**. Everything is readable.
+2. Capture while visiting an HTTPS site and apply `tls.handshake.type == 1`. Find the SNI and the ALPN value. Notice that you can't see the page contents.
+3. Repeat step 2 with `SSLKEYLOGFILE` set and the TLS preference configured. Now filter for `http2` or `http` and compare what you can read.
+
+## Common problems
+
+- **Filter `http` shows nothing:** the traffic is encrypted, so no plain HTTP exists. Check for `tls` or `quic` instead.
+- **Decryption doesn't work after setting `SSLKEYLOGFILE`:**
+  - The browser was already running when the variable was set. Fully close it and relaunch it (on macOS and Linux, from the same terminal).
+  - The key log file is empty. Check that it's growing while you browse.
+  - The path in the Wireshark preference is wrong.
+  - The capture doesn't include the start of the connection.
+  - The traffic is QUIC, which needs a recent Wireshark or a browser setting that disables QUIC for the test.
+- **Wireshark shows "Application Data" only:** that's the encrypted content. Without keys, that is as far as it goes.
+- **Certificate details are missing:** the connection uses TLS 1.3, which hides the certificate from observers.
+- **Only part of a page's traffic appears:** the browser reused existing connections or used HTTP/2 multiplexing. Read the HTTP/2 streams rather than expecting one connection per resource.
+
+## Verification
+
+- You can state, for your capture, what is visible (addresses, timing, sizes, SNI) and what is hidden (paths, headers, bodies).
+- With a key log file configured, requests and responses for your test session show in readable form, and the Decrypted TLS tab is populated.
+- You deleted or secured the key log file and the capture when finished.
+
+## Safety and legal notes
+
+- Only capture, decrypt, or intercept traffic on systems and networks you own or have written authorization to test. Decrypting other people's traffic without permission can be illegal and a serious privacy violation.
+- A key log file lets anyone who has it decrypt the matching capture. Treat it like a secret, store it safely, and delete it when you're done. Unset or remove `SSLKEYLOGFILE` afterward so the browser stops writing it.
+- Decrypted captures can reveal passwords, session cookies, personal data, and healthcare data. Don't publish them, and don't use real accounts or real data in portfolio examples. Use lab accounts, test data, and public sample captures.
+- On work or shared devices, follow your organization's policies before capturing or decrypting anything.
+
+## Related articles
+
+- Getting started with Wireshark: capture filters vs display filters
+- Finding the cause of slow connections: DNS delays, TCP retransmits, and handshake failures
+- Troubleshooting TLS/SSL certificate errors
+- Reading and replaying API requests with Postman
