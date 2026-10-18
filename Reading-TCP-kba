@@ -1,0 +1,368 @@
+TCP is a connection-oriented protocol. Before application data such as HTTP, HTTPS, SSH, or database traffic can normally be exchanged, the client and server establish a TCP session.
+
+The TCP connection process can generally be divided into three stages:
+
+Connection establishment
+Data transfer
+Connection termination
+
+During packet analysis, understanding these stages makes it easier to determine whether a connection was successfully established, whether communication occurred, and why a connection may have ended unexpectedly.
+
+TCP Three-Way Handshake
+
+A standard TCP connection begins with a three-way handshake.
+
+Step 1: SYN
+
+The client sends a TCP packet with the SYN flag set.
+
+Example:
+
+Client: 192.168.1.10:51542
+Server: 192.168.1.20:443
+
+Client to Server: SYN
+
+The SYN packet indicates that the client wants to establish a TCP connection with the server.
+
+The packet also contains an initial sequence number. TCP uses sequence numbers to keep track of transmitted data and acknowledgments.
+
+Step 2: SYN/ACK
+
+The server responds with both SYN and ACK flags set.
+
+Server to Client: SYN, ACK
+
+The server is acknowledging the client's SYN and providing its own initial sequence number.
+
+At this point, both hosts have communicated their initial TCP sequence information.
+
+Step 3: ACK
+
+The client sends an ACK back to the server.
+
+Client to Server: ACK
+
+The three-way handshake is now complete and the TCP connection can begin carrying application data.
+
+In simplified form:
+
+Client -> Server: SYN
+Server -> Client: SYN/ACK
+Client -> Server: ACK
+
+Wireshark Analysis
+
+When examining a capture in Wireshark, start by identifying the connection you want to investigate.
+
+Useful filters include:
+
+tcp
+
+Displays TCP traffic.
+
+tcp.flags.syn == 1
+
+Displays packets containing the SYN flag.
+
+tcp.flags.syn == 1 && tcp.flags.ack == 1
+
+Displays SYN/ACK packets.
+
+tcp.stream eq 0
+
+Displays packets belonging to a specific TCP stream. Replace 0 with the appropriate stream number.
+
+A useful approach is to locate the initial SYN and then follow the packet sequence.
+
+A successful connection should normally resemble:
+
+Client sends SYN
+Server responds with SYN/ACK
+Client sends ACK
+Application data begins
+Additional TCP segments are exchanged
+Connection eventually terminates
+
+Identifying a Failed Connection
+
+Not every SYN results in a successful connection.
+
+For example:
+
+Client -> Server: SYN
+Server -> Client: RST, ACK
+
+This indicates that the server or another device rejected the connection.
+
+Possible causes include:
+
+No application is listening on the destination port
+The destination service is unavailable
+A firewall or security device rejected the connection
+The server intentionally refused the connection
+The destination port is closed
+Network security controls are interfering with the connection
+
+The RST alone does not identify which explanation is correct. Additional packet analysis is required.
+
+Understanding TCP RST
+
+RST stands for Reset.
+
+A TCP RST is used to immediately terminate or reject a TCP connection.
+
+Use the following Wireshark filter to locate TCP resets:
+
+tcp.flags.reset == 1
+
+Once an RST is identified, examine the packets immediately before and after it.
+
+Important questions include:
+
+Who sent the RST?
+
+Was the connection already established?
+
+Was application data being exchanged?
+
+What port was involved?
+
+Was the RST sent immediately after a SYN?
+
+Was the RST sent after a long-established connection?
+
+Are multiple connections experiencing the same behavior?
+
+Was the connection initiated by an internal or external host?
+
+RST During Connection Establishment
+
+Consider the following:
+
+Client -> Server: SYN
+Server -> Client: RST, ACK
+
+The TCP handshake did not complete.
+
+This can indicate that the destination host rejected the connection or that a device in the network path generated the reset.
+
+For example, a client attempting to connect to TCP port 443 might receive an RST because the expected service is not accepting connections.
+
+RST After Successful Handshake
+
+A different situation is:
+
+Client -> Server: SYN
+Server -> Client: SYN/ACK
+Client -> Server: ACK
+Client -> Server: Application Data
+Server -> Client: RST
+
+Here, the TCP connection was successfully established before the reset occurred.
+
+This is important because the investigation should now focus on what happened during the established session.
+
+Potential causes include:
+
+Application failure
+Server-side connection termination
+Protocol violation
+Resource limitations
+Firewall or security appliance behavior
+Application timeout
+Unexpected or invalid traffic
+Administrative intervention
+
+The packet capture should be reviewed for additional evidence before assigning a cause.
+
+RST Versus FIN
+
+A common mistake during packet analysis is treating RST and FIN as equivalent.
+
+They are not.
+
+FIN is normally used for an orderly TCP connection shutdown.
+
+RST is used to immediately terminate or reject a connection.
+
+Normal termination may look similar to:
+
+Client -> Server: FIN, ACK
+Server -> Client: ACK
+Server -> Client: FIN, ACK
+Client -> Server: ACK
+
+This represents an orderly connection shutdown.
+
+An RST is different because it indicates an abrupt termination or rejection.
+
+Wireshark filter for FIN packets:
+
+tcp.flags.fin == 1
+
+Wireshark filter for RST packets:
+
+tcp.flags.reset == 1
+
+Following a TCP Stream
+
+One of the most useful features in Wireshark is Follow TCP Stream.
+
+Right-click a TCP packet and select:
+
+Follow -> TCP Stream
+
+This allows the analyst to examine the traffic belonging to that particular TCP conversation.
+
+Following the stream can help determine:
+
+Which hosts communicated
+Which ports were involved
+Whether application data was exchanged
+When the connection terminated
+Whether the reset occurred during application communication
+Whether the traffic appears consistent with the expected application
+
+TCP Retransmissions
+
+TCP analysis should not focus exclusively on RST packets.
+
+Retransmissions can indicate packet loss, congestion, filtering, or other network conditions.
+
+Useful filter:
+
+tcp.analysis.retransmission
+
+Also useful:
+
+tcp.analysis.fast_retransmission
+
+tcp.analysis.duplicate_ack
+
+Repeated retransmissions followed by a connection reset can provide additional context when investigating a network problem.
+
+Example Investigation
+
+Suppose an internal workstation attempts to connect to an internal server on TCP port 443.
+
+The capture shows:
+
+192.168.1.50 -> 192.168.1.100:443 SYN
+
+192.168.1.100:443 -> 192.168.1.50 SYN/ACK
+
+192.168.1.50 -> 192.168.1.100:443 ACK
+
+192.168.1.50 -> 192.168.1.100:443 Application Data
+
+192.168.1.100:443 -> 192.168.1.50 RST
+
+The initial handshake completed successfully.
+
+This means the server was reachable and responded to the connection attempt.
+
+The investigation should therefore move beyond basic connectivity and examine what occurred immediately before the RST.
+
+Questions to investigate include:
+
+Did the server application encounter an error?
+Did the client send unexpected data?
+Did a firewall or security appliance terminate the connection?
+Did the server experience a resource problem?
+Did multiple clients experience the same behavior?
+Does the issue occur consistently with this application?
+Are there corresponding application or server logs?
+
+Security Analysis
+
+TCP resets can be relevant during security investigations, but an RST should not automatically be classified as malicious.
+
+For example, an RST may be completely normal when connecting to a closed port.
+
+However, unusual patterns can warrant additional investigation.
+
+Examples include:
+
+Large numbers of resets from a single external source
+Repeated resets targeting specific services
+Unexpected resets involving sensitive services
+Resets occurring consistently after specific application requests
+Connections being terminated by an unexpected network device
+RST activity occurring alongside scanning or suspicious traffic
+Connections repeatedly being established and immediately terminated
+
+The packet context should always be considered.
+
+Security analysts should correlate packet-level observations with other evidence such as firewall logs, endpoint logs, server logs, authentication events, IDS/IPS alerts, and application logs.
+
+Useful Wireshark Filters
+
+General TCP traffic:
+
+tcp
+
+TCP SYN packets:
+
+tcp.flags.syn == 1
+
+SYN/ACK packets:
+
+tcp.flags.syn == 1 && tcp.flags.ack == 1
+
+TCP resets:
+
+tcp.flags.reset == 1
+
+TCP FIN packets:
+
+tcp.flags.fin == 1
+
+TCP retransmissions:
+
+tcp.analysis.retransmission
+
+Duplicate acknowledgments:
+
+tcp.analysis.duplicate_ack
+
+TCP streams:
+
+tcp.stream eq 0
+
+Replace 0 with the appropriate TCP stream number.
+
+Recommended Investigation Workflow
+
+Identify the source and destination IP addresses.
+Identify the source and destination ports.
+Locate the initial SYN packet.
+Determine whether the server responded with SYN/ACK.
+Confirm whether the client responded with ACK.
+Determine whether application data was exchanged.
+Search for TCP RST packets.
+Determine which host generated the RST.
+Determine whether the RST occurred during connection establishment or after the connection was established.
+Check for retransmissions, duplicate acknowledgments, or other TCP anomalies.
+Follow the TCP stream when appropriate.
+Correlate the packet capture with firewall, server, endpoint, or application logs.
+Determine the most likely explanation based on the available evidence.
+Document the findings and distinguish confirmed facts from assumptions.
+
+Key Takeaways
+
+A TCP three-way handshake consists of SYN, SYN/ACK, and ACK.
+
+A completed handshake indicates that the TCP connection was successfully established.
+
+A TCP RST indicates an abrupt termination or rejection of a TCP connection.
+
+An RST does not automatically indicate an attack.
+
+The timing and direction of the RST are important when determining its likely cause.
+
+RST packets occurring before the handshake completes should be investigated differently from RST packets occurring after application data has been exchanged.
+
+Wireshark filters, Follow TCP Stream, TCP analysis flags, and correlation with other logs can provide the context necessary to determine what happened.
+
+The most important principle when analyzing TCP resets is to avoid drawing conclusions from a single packet. Examine the complete connection, surrounding traffic, and supporting security or application telemetry before determining whether the behavior represents a normal network condition, an application problem, or a potential security event.
