@@ -1,0 +1,152 @@
+# Getting started with Wireshark: capture filters vs display filters
+
+**Applies to:** Wireshark 3.x and 4.x on Windows, macOS, and Linux
+**Audience:** Support, QA, junior security and network analysts
+**Last updated:** [date]
+
+*Menu names and shortcuts can differ slightly between versions.*
+
+## Symptoms
+
+- You opened Wireshark and thousands of packets scroll by, and you can't find the traffic you care about.
+- A capture file is huge and slow to open.
+- You typed a filter and Wireshark turned the filter bar red.
+- You need to look at one device, one port, or one protocol and ignore the rest.
+
+## Cause
+
+Wireshark has **two different filter systems** with different syntax and different purposes. Mixing them up is the most common beginner mistake.
+
+### Capture filter
+
+- **When it applies:** before the capture starts.
+- **What it does:** decides which packets are **recorded**. Everything else is discarded and can't be recovered.
+- **Syntax:** BPF (Berkeley Packet Filter), the same as `tcpdump`.
+- **Example:** `host 10.0.0.5 and port 443`
+- **Where to set it:** the Capture Options window.
+- **Best for:** keeping files small, long captures, and busy networks.
+
+### Display filter
+
+- **When it applies:** after packets are captured, on screen.
+- **What it does:** decides which captured packets are **shown**. Nothing is deleted, and you can change it any time.
+- **Syntax:** Wireshark's own filter language.
+- **Example:** `ip.addr == 10.0.0.5 && tcp.port == 443`
+- **Where to set it:** the filter bar above the packet list.
+- **Best for:** analysis, investigation, and exploring.
+
+**Rule of thumb:** use a capture filter to limit *what you collect*, and a display filter to *find things in what you collected*. When unsure, capture broadly and filter on screen, as long as file size is manageable.
+
+## Resolution
+
+### Step 1: Start a capture
+
+1. Open Wireshark and select the network interface that shows activity (the line graph moves). This is usually Wi-Fi or Ethernet.
+2. For a capture filter, open **Capture > Options** (**Ctrl+K**) first and enter the filter in the **Capture filter for selected interfaces** field. A valid filter shows a green background.
+3. Click the blue shark-fin button to start, and the red square to stop.
+4. Save with **File > Save As** (the default `.pcapng` format is fine).
+
+If no interfaces appear or capture fails, it's usually a permissions issue: the packet capture driver (Npcap on Windows) isn't installed, or on Linux your user isn't allowed to capture (for example, not in the `wireshark` group).
+
+### Step 2: Capture filters (BPF syntax)
+
+Set these **before** capturing.
+
+- Traffic to or from one host: `host 192.168.1.10`
+- Only traffic from a source: `src host 192.168.1.10`
+- Only traffic to a destination: `dst host 192.168.1.10`
+- A whole subnet: `net 192.168.1.0/24`
+- One port: `port 443`
+- TCP on one port: `tcp port 80`
+- A range of ports: `portrange 8000-8100`
+- DNS only: `udp port 53`
+- Exclude a protocol or host: `not port 22` or `not host 192.168.1.5`
+- Combine conditions: `host 192.168.1.10 and (port 80 or port 443)`
+
+Operators: `and`, `or`, `not` (also `&&`, `||`, `!`). Use parentheses to group.
+
+**Warning:** a capture filter that's too narrow can hide the very packets you need, and you can't get them back. For example, capturing only `port 80` will miss DNS lookups and HTTPS traffic.
+
+### Step 3: Display filters (Wireshark syntax)
+
+Type these in the filter bar and press **Enter**. Green means valid, red means invalid syntax, and yellow is a warning. To clear, click the **X** in the filter bar.
+
+**Hosts and ports**
+
+- Traffic to or from an IP: `ip.addr == 192.168.1.10`
+- Only from a source: `ip.src == 192.168.1.10`
+- Only to a destination: `ip.dst == 192.168.1.10`
+- Port: `tcp.port == 443`
+- Exclude an address: `!(ip.addr == 192.168.1.5)`
+
+**Protocols**
+
+- DNS: `dns`
+- A specific DNS name: `dns.qry.name contains "example"`
+- HTTP requests: `http.request`
+- HTTP by method: `http.request.method == "POST"`
+- HTTP error responses: `http.response.code >= 400`
+- TLS handshakes (Client Hello): `tls.handshake.type == 1`
+- ICMP (ping): `icmp`
+- ARP: `arp`
+
+**TCP problems**
+
+- Connection start (SYN): `tcp.flags.syn == 1 && tcp.flags.ack == 0`
+- Connection resets: `tcp.flags.reset == 1`
+- Retransmissions: `tcp.analysis.retransmission`
+- Any TCP warning Wireshark detected: `tcp.analysis.flags`
+- Slow gaps between packets: `frame.time_delta > 1`
+
+**Combining**
+
+- `&&` (and), `||` (or), `!` (not): `ip.addr == 10.0.0.5 && dns`
+- Show two protocols: `dns || http`
+- Hide noise: `!(arp || dns || icmp)`
+
+### Step 4: Build filters without memorizing them
+
+- **Right-click a field** in the packet details pane, then choose **Apply as Filter > Selected**. Wireshark writes the syntax for you.
+- **Follow a conversation:** right-click a packet and choose **Follow > TCP Stream**. This shows the data exchanged in one connection and applies a matching filter.
+- **Statistics > Conversations** shows who talked to whom and how much.
+- **Statistics > Protocol Hierarchy** shows what protocols are in the capture.
+- **Analyze > Expert Information** lists problems Wireshark found, such as retransmissions and resets.
+- Save frequently used display filters with the **+** button on the filter bar.
+
+### Step 5: Try a practice exercise
+
+1. Start a capture with no filter.
+2. Visit a website in your browser, then stop the capture.
+3. Apply `dns` and find the lookup for the site's name.
+4. Apply `tcp.flags.syn == 1 && tcp.flags.ack == 0` to see new connections starting.
+5. Apply `tls.handshake.type == 1` to see which sites your browser started secure connections to.
+6. Next time, set the capture filter `port 53` and notice that you only record DNS.
+
+## Common problems
+
+- **Filter bar is red:** check syntax and spelling. Display filters use `==` and field names like `ip.addr`, not BPF words like `host`.
+- **Capture filter typed into the display bar (or the reverse):** BPF in the display bar turns red, and display syntax in the capture field is rejected.
+- **No packets shown after filtering:** the filter is too narrow, or the traffic isn't on this interface. Clear the filter to check.
+- **HTTPS content isn't readable:** most web traffic is encrypted with TLS. You can see handshakes, domains in the Client Hello, timing, and sizes, but not the contents, unless you're analyzing your own test traffic with session keys configured.
+- **Capture only shows your own machine's traffic:** on a switched network you normally only see traffic to and from your device, plus broadcasts. Seeing other devices' traffic needs a mirror (SPAN) port or tap.
+- **File too large:** use a capture filter, stop capturing sooner, or enable a ring buffer in Capture Options.
+
+## Verification
+
+- The packet list shows only the traffic you intended (check the source, destination, and protocol columns).
+- Your filter bar is green and the status bar shows `Displayed` packets as a subset of `Captured`.
+- You can explain whether the filter you used limits what's *recorded* (capture) or *shown* (display).
+
+## Safety and legal notes
+
+- Only capture on networks and devices you own or are explicitly authorized to monitor. Capturing others' traffic without permission can be illegal.
+- Capture files can contain credentials, cookies, personal data, and healthcare data. Treat them like sensitive records.
+- Don't publish captures from real networks or work systems. For a portfolio or practice, use your own lab traffic or publicly available sample captures, and check each source's terms.
+- Keep malware-related sample captures inside a lab setup, and follow the source's handling instructions.
+
+## Related articles
+
+- Diagnosing HTTP status codes
+- Reading a TCP handshake and spotting resets in a capture
+- Troubleshooting DNS with nslookup and dig
+- Using Security Onion to pivot from an alert to a capture
