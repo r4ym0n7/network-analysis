@@ -1,0 +1,157 @@
+# DNS troubleshooting with nslookup and dig
+
+**Applies to:** Windows, macOS, and Linux
+**Audience:** Support, QA, junior network and security analysts
+**Last updated:** [date]
+
+*`nslookup` is built into Windows, macOS, and Linux. `dig` is built into macOS and most Linux systems (package `dnsutils` or `bind-utils`). On Windows, use `dig` through WSL or the BIND tools.*
+
+## Symptoms
+
+- A website or service won't load by name, but works when you use its IP address.
+- A name resolves to the wrong IP address, or to an old one after a change.
+- A site works on some devices or networks but not others.
+- Email to a domain bounces or isn't delivered.
+- The browser says "server not found" or "DNS_PROBE_FINISHED_NXDOMAIN".
+- Connections are slow to start.
+
+## Background
+
+DNS turns names (`www.example.com`) into answers (usually IP addresses). A lookup passes through several layers, and a problem at any one can look the same to the user:
+
+1. The **browser and operating system caches**
+2. The **resolver** your device asks (set by your router, company, or ISP, or a public one such as 1.1.1.1 or 8.8.8.8)
+3. The **authoritative name servers** that hold the real records for the domain
+
+Common record types:
+- **A:** name to IPv4 address
+- **AAAA:** name to IPv6 address
+- **CNAME:** an alias pointing to another name
+- **MX:** mail servers for the domain
+- **TXT:** free text, used for SPF, DKIM, DMARC, and domain verification
+- **NS:** the authoritative name servers for the domain
+- **SOA:** zone details, including a serial number that changes when the zone is updated
+- **PTR:** IP address back to a name (reverse lookup)
+
+**TTL** (time to live) is how many seconds a resolver may cache an answer. A long TTL explains why a change takes time to show up.
+
+## Resolution
+
+### Step 1: Confirm it's really DNS
+
+1. Try reaching the service by IP address, if you know it. If that works but the name doesn't, suspect DNS.
+2. Try another device or network (for example, a phone on mobile data). If it works there, the problem is local to the first network or device.
+3. Run a quick lookup (next step) and see whether it returns an answer, an error, or a timeout.
+
+### Step 2: Basic lookups with nslookup
+
+- Look up a name: `nslookup example.com`
+- Look up a specific record type: `nslookup -type=MX example.com`
+- Ask a specific resolver: `nslookup example.com 8.8.8.8`
+- Reverse lookup: `nslookup 203.0.113.10`
+- Interactive mode: run `nslookup`, then use `set type=TXT` and enter the name.
+
+Reading the output:
+- The first lines show **which server answered**. Check that it's the resolver you expected.
+- **"Non-authoritative answer"** means the answer came from a resolver's cache, not directly from the domain's own name servers. That's normal.
+- `** server can't find example.com: NXDOMAIN` means the name doesn't exist.
+- `DNS request timed out` means the server didn't respond.
+
+### Step 3: Detailed lookups with dig
+
+- Standard lookup: `dig example.com`
+- Short answer only: `dig example.com +short`
+- Specific record type: `dig example.com MX` or `dig example.com TXT`
+- Ask a specific resolver: `dig @1.1.1.1 example.com`
+- Name servers for a domain: `dig example.com NS`
+- Reverse lookup: `dig -x 203.0.113.10`
+- Cleaner output (answers only): `dig example.com +noall +answer`
+- Follow the lookup from the root servers down: `dig example.com +trace`
+
+Reading the `dig` output:
+- **status:** the result code in the header line (see below).
+- **flags:** `qr` (response), `rd` (recursion desired), `ra` (recursion available), and `aa` (the answer came from an authoritative server).
+- **ANSWER SECTION:** the records returned, with the **TTL** in seconds in the second column.
+- **Query time** and **SERVER** at the bottom: how long it took and which server answered.
+
+### Step 4: Understand the result code
+
+- **NOERROR with answers:** the lookup worked.
+- **NOERROR with an empty answer:** the name exists but has no record of the type you asked for (for example, no AAAA record).
+- **NXDOMAIN:** the name doesn't exist. Check for typos, a missing record, or a domain that expired or was never created.
+- **SERVFAIL:** the resolver couldn't get a valid answer. Common causes are unreachable or misconfigured authoritative servers and DNSSEC validation failures. Try another resolver and the authoritative server directly.
+- **REFUSED:** the server won't answer you, often because of access rules on that resolver.
+- **Timeout:** the server didn't respond. Check network connectivity, firewalls, and whether the DNS server address is right.
+
+### Step 5: Compare layers to find where it breaks
+
+1. **Your default resolver:** `dig example.com`
+2. **A public resolver:** `dig @1.1.1.1 example.com` and `dig @8.8.8.8 example.com`
+3. **The authoritative server:** find it with `dig example.com NS`, then ask it directly: `dig @ns1.example-dns.net example.com`
+4. **The full path:** `dig example.com +trace`
+
+How to read the comparison:
+- Public resolver works but your default doesn't: the problem is your local resolver (stale cache, bad settings, filtering, or an outage).
+- Authoritative server has the right record but resolvers return something old: caching and TTL. Wait for it to expire, or flush the cache you control.
+- Authoritative server returns the wrong or missing record: the record needs to be fixed at the DNS host.
+- The authoritative servers differ from each other (compare the SOA serial numbers with `dig example.com SOA`): a zone isn't synchronized.
+- Trace fails partway: the NS records at the registrar don't match the DNS host, or a delegated server is down.
+
+### Step 6: Check the local machine
+
+- **Which DNS servers are in use:**
+  - Windows: `ipconfig /all`
+  - macOS: `scutil --dns`
+  - Linux: `resolvectl status` or `cat /etc/resolv.conf`
+- **Hosts file overrides:** a line in the hosts file can force a name to a specific IP.
+  - Windows: `C:\Windows\System32\drivers\etc\hosts`
+  - macOS and Linux: `/etc/hosts`
+- **VPN or split DNS:** some names only resolve while connected to the VPN, and others only when disconnected.
+- **Browser DNS settings:** "Secure DNS" (DNS over HTTPS) can make the browser use a different resolver than the operating system.
+- **Flush caches:**
+  - Windows: `ipconfig /flushdns`
+  - macOS: `sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder`
+  - Linux (systemd-resolved): `resolvectl flush-caches`
+  - Chrome browser cache: open `chrome://net-internals/#dns` and clear the host cache.
+
+### Step 7: Match the symptom to the likely cause
+
+- **NXDOMAIN for a name that should exist:** missing or misspelled record, expired domain, or a record created in the wrong zone. Fix: add or correct the record, or renew the domain.
+- **Old IP address after a change:** cached answer is still within its TTL. Fix: wait, flush local caches, and lower the TTL before future planned changes.
+- **Wrong IP only on some networks or only on VPN:** split-horizon (internal vs external) DNS or a different resolver. Fix: query each resolver and compare.
+- **Works by IP but not by name:** DNS failure or a hosts-file override. Fix: follow steps 5 and 6.
+- **Intermittent failures:** one of several authoritative servers or resolvers returning bad data. Fix: query each name server separately.
+- **Site loads slowly or only on IPv4:** broken or incorrect AAAA record. Fix: check `dig example.com AAAA` and correct or remove it.
+- **Email not delivered:** missing or wrong MX record, an MX that points to a CNAME (not allowed), or missing SPF, DKIM, or DMARC TXT records. Fix: check `dig example.com MX` and `dig example.com TXT`, then correct them.
+- **CNAME points to a name that no longer exists:** a "dangling" CNAME. Fix: update or remove the record.
+- **SERVFAIL on one resolver but not others:** possible DNSSEC validation problem. Fix: report to the domain owner, and compare with `dig +cd` only as a diagnostic step.
+- **Name servers at the registrar don't match the DNS host:** the domain delegates to the wrong servers. Fix: correct the NS records at the registrar.
+
+### Step 8: Escalate with evidence
+
+Send the owner of the DNS zone or network:
+- The exact name and record type queried
+- The command used and its full output
+- Which resolver or server answered, and the time of the test
+- Results from at least one other resolver and from the authoritative server
+- Whether the problem is on one device, one network, or everywhere
+
+## Verification
+
+- The name resolves to the expected answer from your default resolver and from at least one public resolver.
+- The authoritative servers all return the same answer, and the SOA serial numbers match.
+- The application or website now loads by name on the affected device and network.
+- Re-check after the TTL has expired if the fix depended on a change propagating.
+
+## Safety notes
+
+- Only run lookups and tests against domains and servers you own or are allowed to test. Ordinary queries are fine, but don't attempt zone transfers (`AXFR`) or heavy query volumes against domains you don't manage.
+- DNS queries are visible to the resolver you use. Avoid querying sensitive internal names against public resolvers.
+- Don't share internal hostnames, IP ranges, or full outputs from internal systems in public repos or screenshots.
+
+## Related articles
+
+- Diagnosing HTTP status codes
+- Troubleshooting TLS/SSL certificate errors
+- Getting started with Wireshark: capture filters vs display filters
+- Phishing email triage: reading SPF, DKIM, and DMARC
