@@ -1,0 +1,192 @@
+# Finding the cause of slow connections: DNS delays, TCP retransmits, and handshake failures
+
+**Applies to:** Web applications and network services; Chrome/Edge/Firefox DevTools, Wireshark, `dig`, `ping`, `traceroute`
+**Audience:** Support, QA, junior network and security analysts
+**Last updated:** [date]
+
+*Menu names and field names can differ slightly between tool versions.*
+
+## Symptoms
+
+- Pages or applications take a long time to start loading, then load normally.
+- Connections hang for a few seconds before they succeed (often exactly 1, 3, or 5 seconds).
+- Downloads or API calls start fast but stall or crawl.
+- Timeouts or "connection reset" errors that come and go.
+- Slow only on one network, one device, one time of day, or one VPN.
+
+## Background: where a connection's time goes
+
+A single web request passes through phases, and a delay in any one of them feels like "slow":
+
+1. **Queueing/stalled:** the browser waits for a free connection slot.
+2. **DNS lookup:** turning the name into an IP address.
+3. **TCP handshake:** SYN, SYN-ACK, ACK. This takes roughly one network round trip.
+4. **TLS handshake:** certificate and key exchange for HTTPS, one or two more round trips.
+5. **Request sent and server processing:** the time until the first byte comes back (often called TTFB or "waiting").
+6. **Content download:** transferring the response.
+
+**Packet loss** and **retransmissions** can slow any of these phases. The troubleshooting goal is to find *which phase* is slow, then find out why.
+
+## Resolution
+
+### Step 1: Find the slow phase in the browser
+
+1. Open DevTools (**F12**) and go to **Network**. Check **Disable cache** and reload.
+2. Click the slow request and open the **Timing** tab.
+3. Read each segment:
+   - **Stalled/Queueing:** long means too many parallel requests or a blocked connection.
+   - **DNS Lookup:** long means a DNS problem (go to Step 2).
+   - **Initial connection:** long means a slow or failing TCP handshake (go to Step 3).
+   - **SSL:** long means a slow TLS handshake (go to Step 4).
+   - **Waiting for server response (TTFB):** long usually means the server or an application behind it is slow (go to Step 6).
+   - **Content Download:** long means a large response, a slow link, or loss and retransmissions (go to Step 5).
+4. Repeat the test a few times and on another network. A single slow sample proves little.
+
+### Step 2: DNS delays
+
+**What it looks like:** a long DNS Lookup time, or a pause of exactly several seconds before anything else happens.
+
+**Check**
+1. Time a lookup: `dig example.com` and read **Query time** at the bottom. Compare with `dig @1.1.1.1 example.com` and `dig @8.8.8.8 example.com`.
+2. Run the lookup twice. If the first is slow and the second is fast, the first was uncached and the resolver is slow to fetch answers.
+3. In Wireshark, use the display filter `dns.time > 0.5` to find slow responses, and `dns` to look for queries with no response at all.
+4. Look for a query sent to a first DNS server, a gap of several seconds, then the same query sent to a second server. This pattern points to a dead or unreachable primary resolver.
+5. Check for slow or failing AAAA (IPv6) lookups or connection attempts that fall back to IPv4 after a delay.
+
+**Remedies**
+- Replace a dead or slow DNS server in the network settings or the router or DHCP configuration.
+- Test with a public resolver to confirm the cause.
+- Fix or remove broken AAAA records, or repair IPv6 connectivity.
+- For VPN users, check that the VPN's DNS servers are reachable.
+- See the DNS troubleshooting article for deeper steps.
+
+### Step 3: TCP handshake problems
+
+**What it looks like:** a long "Initial connection" time, or connections that hang and then fail.
+
+**Check in Wireshark**
+1. Filter new connections: `tcp.flags.syn == 1 && tcp.flags.ack == 0`.
+2. Pick one and follow the same connection (**right-click > Conversation Filter > TCP**).
+3. Look at what happens:
+   - **SYN, SYN-ACK, ACK quickly:** the handshake is healthy. The time between the SYN and the SYN-ACK is roughly the network round-trip time.
+   - **SYN repeated with no SYN-ACK** (retries typically spaced about 1, 2, then 4 seconds apart): the packet is being dropped. Think firewall, wrong route, server down, or a blocked port.
+   - **SYN answered by RST:** the port is closed or the connection was refused.
+   - **Long delay before the SYN-ACK:** high latency or an overloaded server or network path.
+
+**Remedies**
+- Confirm the destination and port are correct and the service is running.
+- Check firewall, security group, and network ACL rules in both directions.
+- Check routing with `traceroute` (`tracert` on Windows). See Step 7.
+- If round-trip time is high everywhere, investigate the path or the link.
+
+### Step 4: TLS handshake problems
+
+**What it looks like:** a long "SSL" time, a hang after the TCP connection succeeds, or errors like "handshake failure."
+
+**Check in Wireshark**
+1. Filter: `tls.handshake` to see handshake messages in order (Client Hello, Server Hello, Certificate, and so on).
+2. Look for alerts: `tls.alert_message`. Common ones include `handshake_failure`, `protocol_version`, `unknown_ca`, and `certificate_expired`.
+3. Look for a **Client Hello with no Server Hello**. This means the server never answered or something in the path blocked or dropped it.
+4. If the connection stalls right after the Client Hello or Server Hello and retransmissions follow, suspect large packets being dropped (see MTU in Step 5).
+
+**Remedies**
+- **Protocol or cipher mismatch:** align the TLS versions and cipher suites supported by client and server.
+- **Certificate problems:** fix an expired, mismatched, or incomplete certificate chain.
+- **Inspection devices or proxies:** check whether a firewall or proxy is intercepting TLS and failing to handle the connection.
+- **Slow server key exchange:** if the server is overloaded, address the server's capacity.
+
+### Step 5: TCP retransmissions, loss, and slow transfers
+
+**What it looks like:** transfers that start and then stall, speeds that fluctuate, or long Content Download times.
+
+**Check in Wireshark**
+- `tcp.analysis.retransmission` for packets that had to be resent.
+- `tcp.analysis.fast_retransmission` for resends triggered by duplicate ACKs.
+- `tcp.analysis.duplicate_ack` for the receiver signaling a missing packet.
+- `tcp.analysis.lost_segment` for a gap that Wireshark detected in the data.
+- `tcp.analysis.zero_window` and `tcp.analysis.window_full` for a receiver that can't keep up or a sender waiting on it.
+- `tcp.analysis.flags` for everything Wireshark flags as a TCP problem.
+- **Analyze > Expert Information** gives a summary.
+- **Statistics > TCP Stream Graphs** (Round Trip Time and Time-Sequence) shows stalls visually.
+
+A few retransmissions are normal. Sustained, clustered, or growing retransmissions in one conversation are what matter. As a rough rule, a conversation where well over 1 to 2 percent of packets are retransmitted deserves investigation.
+
+**Where to look, by what you find**
+- **Retransmissions in bursts on Wi-Fi:** weak signal, interference, or congestion. Move closer, change channel or band, or test on a wired connection.
+- **Retransmissions on a wired link:** a bad cable or port, a duplex mismatch, or an overloaded switch or router. Check interface error counters on the devices.
+- **Retransmissions only past a certain point or with large transfers:** possibly a **packet-size (MTU/MSS) problem**. Small packets work and large ones silently disappear, often on VPNs and tunnels. Test with progressively larger packets using ping with the "don't fragment" option, and review MTU/MSS settings on the tunnel or interface.
+- **Zero window or window full:** the receiving application or device can't consume data fast enough. Check CPU and memory on that endpoint.
+- **Loss at a specific hop:** see the path test in Step 7.
+
+### Step 6: Slow server response (high TTFB)
+
+**What it looks like:** the network phases are fast, but "Waiting for server response" is long.
+
+**Check**
+1. In DevTools, note the TTFB across several requests and whether only certain endpoints are slow.
+2. In Wireshark, use `http.time > 2` (for unencrypted HTTP) to find slow responses. For HTTPS, compare the time between the client's request and the first server data packet.
+3. Compare a fast endpoint with the slow one to see whether the slowness is application-wide or specific.
+
+**Remedies**
+- This is usually a back-end issue: slow database queries, overloaded servers, or slow upstream services. Escalate to engineering with timestamps, URLs, and timings.
+- A 504 error confirms a gateway timed out waiting for the application. See the HTTP status codes article.
+
+### Step 7: Test the path
+
+1. **Ping** the destination for latency and loss: `ping example.com`. Watch for packet loss and large swings in response time. Some systems block ping, so a failed ping doesn't prove the server is down.
+2. **Trace the route:** `traceroute example.com` (macOS and Linux) or `tracert example.com` (Windows). Tools like `mtr` combine ping and traceroute.
+3. Read the results carefully:
+   - A hop with high latency or loss that **continues in every later hop** points to a real problem at or after that hop.
+   - A single hop with high latency that **disappears at later hops** is usually just that router deprioritizing its own replies and is not a problem.
+4. Run the test at the slow time and at a normal time for comparison.
+
+### Step 8: Rule out local causes
+
+- Weak Wi-Fi signal or interference: test on a wired connection.
+- Bandwidth being used by something else: large uploads, backups, updates, or other devices.
+- VPN, proxy, or security software adding latency or inspecting traffic: compare with and without, where policy allows.
+- Router or modem problems: restart and check firmware, or test with a different device.
+- Differences between devices or locations: test from another device and network.
+
+### Step 9: Match what you found to a likely cause
+
+- **Long DNS time, or a multi-second pause before connecting:** dead or slow resolver, broken IPv6 fallback. Fix the resolver or the records.
+- **SYN retransmitted with no reply:** firewall drop, wrong route, or server unreachable. Check rules and routing.
+- **Handshake works but TLS stalls or alerts appear:** TLS version, certificate, or inspection problem, or large packets being dropped.
+- **Heavy retransmissions on Wi-Fi:** signal or interference.
+- **Retransmissions only on large packets or over a VPN:** MTU/MSS mismatch.
+- **Fast network phases but long TTFB:** slow application or database.
+- **Slow only at certain times:** congestion or load. Compare peak and off-peak measurements.
+- **Slow on one device or network only:** local settings, Wi-Fi, or software on that device.
+
+### Step 10: Escalate with evidence
+
+Include:
+- The affected URL or service and the symptom
+- Time and time zone of failures, and how often it happens
+- The DevTools Timing breakdown for a slow request
+- DNS timing from `dig` and the resolver used
+- Wireshark findings (for example, SYN retransmissions, TLS alert type, retransmission counts), with a sanitized screenshot or a short excerpt
+- Ping and traceroute results from a slow period and a normal period
+- Whether it affects one device, one network, or everyone
+
+## Verification
+
+- The slow phase is identified and the fix addresses it.
+- Timing in DevTools returns to normal across several tests, at different times.
+- Wireshark shows few or no retransmissions, and no failed or stalled handshakes.
+- The user confirms the application is responsive on the affected device and network.
+
+## Safety and legal notes
+
+- Only capture or test on networks and systems you own or are authorized to monitor.
+- Packet captures can contain credentials, tokens, and personal or healthcare data. Treat them like sensitive records and redact before sharing.
+- Don't publish real captures, internal hostnames, or IP addresses from work systems. Use your own lab traffic or public sample captures for portfolio examples.
+- Avoid heavy ping floods or scans against systems you don't control.
+
+## Related articles
+
+- DNS troubleshooting with nslookup and dig
+- Getting started with Wireshark: capture filters vs display filters
+- Diagnosing HTTP status codes
+- Troubleshooting TLS/SSL certificate errors
